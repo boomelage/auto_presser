@@ -1,9 +1,9 @@
 """Core engine for the Auto key presser.
 
 Kept deliberately free of any UI so it can be driven by a GUI, a CLI, or a
-test. It validates the requested key up front, runs the press loop on a
-background thread that *waits* instead of busy-spinning, and never lets a bad
-keystroke take down the whole program.
+test. It validates the requested key (or mouse button) up front, runs the
+press loop on a background thread that *waits* instead of busy-spinning, and
+never lets a bad keystroke take down the whole program.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import random
 import threading
 from typing import Callable, Optional, Union
 
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 # Friendly names -> the attribute name of the matching pynput special key, so
 # users can pick keys that have no printable character (space, enter, arrows,
@@ -55,7 +55,16 @@ for _friendly, _attr in _SPECIAL_KEY_NAMES.items():
     if _key is not None:
         _SPECIAL_KEYS[_friendly] = _key
 
-KeySpec = Union[str, keyboard.Key]
+# Mouse buttons, pressed through pynput's mouse controller. Prefixed with
+# "mouse_" because plain "left"/"right" already mean the arrow keys.
+_MOUSE_BUTTONS: dict[str, mouse.Button] = {
+    "mouse_left": mouse.Button.left,
+    "lmb": mouse.Button.left,
+    "mouse_right": mouse.Button.right,
+    "rmb": mouse.Button.right,
+}
+
+KeySpec = Union[str, keyboard.Key, mouse.Button]
 
 
 class InvalidKeyError(ValueError):
@@ -66,8 +75,9 @@ def parse_key(text: Optional[str]) -> KeySpec:
     """Turn user text into something pynput can actually press.
 
     A single character is pressed literally; multi-character input is matched
-    case-insensitively against the named special keys. Anything else raises
-    ``InvalidKeyError`` with a message safe to show the user.
+    case-insensitively against the named special keys and mouse buttons.
+    Anything else raises ``InvalidKeyError`` with a message safe to show the
+    user.
     """
     if text is None:
         raise InvalidKeyError("No key provided.")
@@ -79,14 +89,16 @@ def parse_key(text: Optional[str]) -> KeySpec:
     lowered = stripped.lower()
     if lowered in _SPECIAL_KEYS:
         return _SPECIAL_KEYS[lowered]
+    if lowered in _MOUSE_BUTTONS:
+        return _MOUSE_BUTTONS[lowered]
     raise InvalidKeyError(
-        f"'{text}' is not a single character or a known special key "
-        "(e.g. space, enter, tab, up, f5)."
+        f"'{text}' is not a single character, a known special key "
+        "(e.g. space, enter, tab, up, f5) or a mouse button (mouse_left, mouse_right)."
     )
 
 
 def available_special_keys() -> list[str]:
-    """Canonical, de-duplicated list of named keys for a UI to offer."""
+    """Canonical, de-duplicated list of named keys/buttons for a UI to offer."""
     canonical = {
         "space", "enter", "tab", "esc", "backspace", "delete", "insert",
         "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
@@ -96,6 +108,7 @@ def available_special_keys() -> list[str]:
     # Only offer keys that actually resolved on this platform (macOS, for
     # instance, has no Insert key).
     canonical &= _SPECIAL_KEYS.keys()
+    canonical.update({"mouse_left", "mouse_right"})
     return sorted(canonical, key=lambda s: (s[0] != "f" or not s[1:].isdigit(), s))
 
 
@@ -109,7 +122,8 @@ def _clamp_range(low: float, high: float, *, floor: float = 0.0) -> tuple[float,
 
 
 class KeyPresser:
-    """Repeatedly presses a single key with randomised, human-ish timing.
+    """Repeatedly presses a single key or mouse button with randomised,
+    human-ish timing.
 
     The loop lives on a daemon thread. ``start()``/``stop()`` toggle pressing
     without ever spinning the CPU: when idle the thread blocks on an event.
@@ -122,6 +136,7 @@ class KeyPresser:
         on_error: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._controller = keyboard.Controller()
+        self._mouse = mouse.Controller()
         self._key: KeySpec = "a"
         self._key_label = "a"
 
@@ -204,10 +219,11 @@ class KeyPresser:
                     hold = random.uniform(self._hold_min, self._hold_max)
                     gap = random.uniform(self._gap_min, self._gap_max)
                 try:
-                    self._controller.press(key)
+                    controller = self._controller_for(key)
+                    controller.press(key)
                     self._key_is_down = True
                     self._interruptible_sleep(hold)
-                    self._controller.release(key)
+                    controller.release(key)
                     self._key_is_down = False
                     self._interruptible_sleep(gap)
                 except Exception as exc:  # never let one bad press kill the loop
@@ -218,6 +234,10 @@ class KeyPresser:
         finally:
             self._release_key()
 
+    def _controller_for(self, key: KeySpec):
+        """Mouse buttons go through the mouse controller, everything else the keyboard."""
+        return self._mouse if isinstance(key, mouse.Button) else self._controller
+
     def _interruptible_sleep(self, seconds: float) -> None:
         """Sleep, but wake immediately if asked to stop or shut down."""
         # Waiting on the shutdown event lets us bail out of a long gap fast.
@@ -227,7 +247,7 @@ class KeyPresser:
         if self._key_is_down:
             try:
                 with self._lock:
-                    self._controller.release(self._key)
+                    self._controller_for(self._key).release(self._key)
             except Exception:
                 pass
             self._key_is_down = False

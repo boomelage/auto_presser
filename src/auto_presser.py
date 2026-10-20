@@ -1,10 +1,11 @@
 """Auto Key Presser — a small PyQt5 desktop app.
 
-Pick a key, set how fast/often to tap it, then Start. Pressing is driven by
-``presser_engine.KeyPresser`` (validated input, no CPU spin, crash-safe). A
-configurable global hotkey (default Ctrl+Shift+Alt) toggles pressing so you can
-start it after switching to the target window; click "Set hotkey…" to capture a
-new combination, which is remembered between runs.
+Pick a key (or the left/right mouse button), set how fast/often to tap it,
+then Start. Pressing is driven by ``presser_engine.KeyPresser`` (validated
+input, no CPU spin, crash-safe). A configurable global hotkey (default
+Ctrl+Shift+Alt) toggles pressing so you can start it after switching to the
+target window; click "Set hotkey…" to capture a new combination, which is
+remembered between runs.
 
 Run with:  python auto_presser.py
 """
@@ -14,7 +15,7 @@ from __future__ import annotations
 import sys
 import threading
 
-from PyQt5.QtCore import QSettings, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QSettings, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -72,6 +73,12 @@ for _n in range(1, 25):
     _qk = getattr(Qt, f"Key_F{_n}", None)
     if _qk is not None:
         _QT_KEY_NAMES[_qk] = f"f{_n}"
+
+# Qt mouse buttons -> the names presser_engine understands.
+_QT_MOUSE_NAMES = {
+    Qt.LeftButton: "mouse_left",
+    Qt.RightButton: "mouse_right",
+}
 
 
 # --- Global-hotkey capture ------------------------------------------------
@@ -260,7 +267,9 @@ class MainWindow(QMainWindow):
             "so it can't be changed by accident."
         )
         self.capture_btn = QPushButton("Capture…")
-        self.capture_btn.setToolTip("Click, then press any key to capture it.")
+        self.capture_btn.setToolTip(
+            "Click, then press any key — or click the left/right mouse button — to capture it."
+        )
         self.capture_btn.clicked.connect(self._start_capture)
         key_row.addWidget(self.key_edit)
         key_row.addWidget(self.capture_btn)
@@ -363,8 +372,30 @@ class MainWindow(QMainWindow):
     # -- key capture -------------------------------------------------------
     def _start_capture(self) -> None:
         self._capturing = True
-        self.capture_btn.setText("Press any key…")
+        self.capture_btn.setText("Press a key or click…")
         self.setFocus()
+        # Clicks land on child widgets, not this window, so watch for them
+        # app-wide while capturing (see eventFilter).
+        QApplication.instance().installEventFilter(self)
+
+    def _end_capture(self) -> None:
+        self._capturing = False
+        self.capture_btn.setText("Capture…")
+        QApplication.instance().removeEventFilter(self)
+
+    def _set_captured_key(self, name) -> None:
+        if name:
+            self.key_edit.setText(name)
+            self.special_combo.setCurrentIndex(0)
+        self._end_capture()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        # Swallow the capturing click so it doesn't also activate whatever
+        # widget is under the cursor.
+        if self._capturing and event.type() == QEvent.MouseButtonPress:
+            self._set_captured_key(_QT_MOUSE_NAMES.get(event.button()))
+            return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt override)
         # Only the "Capture…" press-key picker uses Qt events; hotkey capture
@@ -376,11 +407,7 @@ class MainWindow(QMainWindow):
         if name is None:
             text = event.text()
             name = text if len(text) == 1 and text.isprintable() else None
-        if name:
-            self.key_edit.setText(name)
-            self.special_combo.setCurrentIndex(0)
-        self._capturing = False
-        self.capture_btn.setText("Capture…")
+        self._set_captured_key(name)
         event.accept()
 
     def _on_special_picked(self, index: int) -> None:
@@ -394,7 +421,8 @@ class MainWindow(QMainWindow):
         self.hotkey_edit.setText(self._hotkey_label)
         self.hint_label.setText(
             f"Global hotkey {self._hotkey_label} toggles pressing.\n"
-            "Switch to your target window first — keys go to whatever is focused."
+            "Switch to your target window first — keys go to whatever is focused,\n"
+            "mouse clicks go wherever the cursor is."
         )
 
     def _set_hotkey_spec(self, spec: str) -> bool:
