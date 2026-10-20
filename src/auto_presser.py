@@ -50,6 +50,9 @@ DEFAULT_HOLD_MAX = 0.12
 DEFAULT_GAP_MIN = 0.5
 DEFAULT_GAP_MAX = 2.0
 
+# The "Rapid" button sets every hold/interval field to this value (seconds).
+RAPID_TIMING = 0.05
+
 # Qt special keys -> the names presser_engine understands.
 _QT_KEY_NAMES = {
     Qt.Key_Space: "space",
@@ -296,9 +299,15 @@ class MainWindow(QMainWindow):
         self.reset_btn = QPushButton("Default")
         self.reset_btn.setToolTip("Reset the timing fields to their default values.")
         self.reset_btn.clicked.connect(self._reset_timing)
+        self.rapid_btn = QPushButton("Rapid")
+        self.rapid_btn.setToolTip(
+            f"Set every hold and interval field to {RAPID_TIMING:.2f} s."
+        )
+        self.rapid_btn.clicked.connect(self._rapid_timing)
         reset_row = QHBoxLayout()
         reset_row.setContentsMargins(0, 0, 0, 0)
         reset_row.addStretch(1)
+        reset_row.addWidget(self.rapid_btn)
         reset_row.addWidget(self.reset_btn)
         reset_wrap = QWidget()
         reset_wrap.setLayout(reset_row)
@@ -577,6 +586,11 @@ class MainWindow(QMainWindow):
         self.hold_max.setValue(DEFAULT_HOLD_MAX)
         self.gap_min.setValue(DEFAULT_GAP_MIN)
         self.gap_max.setValue(DEFAULT_GAP_MAX)
+
+    def _rapid_timing(self) -> None:
+        # Same as _reset_timing: each setValue pushes to the engine.
+        for spin in (self.hold_min, self.hold_max, self.gap_min, self.gap_max):
+            spin.setValue(RAPID_TIMING)
 
     def _on_toggle_clicked(self) -> None:
         if self._engine.is_running:
